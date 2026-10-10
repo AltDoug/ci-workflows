@@ -1,0 +1,71 @@
+name: static
+
+# Syntax gate for repos with no test suite yet (scripts, configs, docs):
+# every tracked .py parses, every .json is valid, every .sh passes bash -n
+# and shellcheck at error severity, every .mjs passes node --check. Seconds
+# on hosted ubuntu. A repo with real tests uses test.yml instead (or both).
+#
+# Caller:
+#   jobs:
+#     static:
+#       uses: AltDoug/ci-workflows/.github/workflows/static.yml@v1
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: JSON runs-on value
+        type: string
+        default: '"ubuntu-latest"'
+      exclude:
+        description: extended regex of tracked paths to skip (matched by grep -E)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    env:
+      EXCLUDE: ${{ inputs.exclude }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: List tracked files by type
+        run: |
+          list() { git ls-files "$1" | { if [ -n "$EXCLUDE" ]; then grep -Ev "$EXCLUDE" || true; else cat; fi; } > "$RUNNER_TEMP/$2"; echo "$2: $(wc -l < "$RUNNER_TEMP/$2")"; }
+          list '*.py' py; list '*.json' json; list '*.sh' sh; list '*.mjs' mjs
+
+      - name: Python syntax
+        run: |
+          [ -s "$RUNNER_TEMP/py" ] || { echo "no .py"; exit 0; }
+          tr '\n' '\0' < "$RUNNER_TEMP/py" | PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pyc" xargs -0 python3 -m py_compile
+
+      - name: JSON validity
+        run: |
+          bad=0
+          while IFS= read -r f; do
+            python3 -m json.tool "$f" >/dev/null 2>&1 || { echo "::error file=$f::invalid JSON"; bad=1; }
+          done < "$RUNNER_TEMP/json"
+          exit "$bad"
+
+      - name: Shell syntax + shellcheck errors
+        run: |
+          [ -s "$RUNNER_TEMP/sh" ] || { echo "no .sh"; exit 0; }
+          tr '\n' '\0' < "$RUNNER_TEMP/sh" | xargs -0 -n1 bash -n
+          if command -v shellcheck >/dev/null; then
+            tr '\n' '\0' < "$RUNNER_TEMP/sh" | xargs -0 shellcheck --shell=bash --severity=error
+          else
+            echo "::notice::shellcheck not installed on this runner — bash -n only"
+          fi
+
+      - name: JS syntax (.mjs)
+        run: |
+          [ -s "$RUNNER_TEMP/mjs" ] || { echo "no .mjs"; exit 0; }
+          tr '\n' '\0' < "$RUNNER_TEMP/mjs" | xargs -0 -n1 node --check

@@ -1,0 +1,59 @@
+name: ci
+
+# Self-test: lint every workflow, then run each reusable workflow the way a
+# caller does, so a broken change is caught before the v1 tag moves.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: actionlint 1.7.12
+        run: |
+          curl -fsSL -o al.tgz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          tar -xzf al.tgz actionlint
+          ./actionlint -color
+
+  static:
+    uses: ./.github/workflows/static.yml
+
+  test-tools:
+    uses: ./.github/workflows/test.yml
+    with:
+      setup: uv bun node
+      python-version: "3.12"
+      command: |
+        uv --version
+        bun --version
+        node --version
+        uv run --no-project python fixtures/ok.py
+
+  pick-no-token:
+    # No RUNNER_PICK_TOKEN passed: must fall back to hosted, never fail.
+    uses: ./.github/workflows/pick-runner.yml
+    with:
+      labels: '["self-hosted","no-such-runner"]'
+      fallback: ubuntu-latest
+
+  pick-fallback-runs:
+    needs: pick-no-token
+    uses: ./.github/workflows/test.yml
+    with:
+      runs-on: ${{ needs.pick-no-token.outputs.runs-on }}
+      command: |
+        test "${{ needs.pick-no-token.outputs.where }}" = hosted
+        test "$RUNNER_ENVIRONMENT" = github-hosted
+        echo "fallback landed on $RUNNER_NAME"

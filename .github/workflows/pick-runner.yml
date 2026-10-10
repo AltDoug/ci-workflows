@@ -1,0 +1,92 @@
+name: pick-runner
+
+# Decides where a test job runs: on a self-hosted runner when one with the
+# requested labels is ONLINE, otherwise on a GitHub-hosted fallback. A queued
+# job on an offline runner waits up to 24 h and blocks the PR; this avoids it.
+#
+# Caller:
+#   jobs:
+#     pick:
+#       uses: AltDoug/ci-workflows/.github/workflows/pick-runner.yml@v1
+#       with:
+#         labels: '["self-hosted","Windows","my-windows-box"]'
+#         fallback: windows-latest
+#         force-hosted: ${{ vars.CI_HOSTED == 'true' }}
+#       secrets:
+#         RUNNER_PICK_TOKEN: ${{ secrets.RUNNER_PICK_TOKEN }}
+#     test:
+#       needs: pick
+#       uses: AltDoug/ci-workflows/.github/workflows/test.yml@v1
+#       with:
+#         runs-on: ${{ needs.pick.outputs.runs-on }}
+#
+# RUNNER_PICK_TOKEN: a fine-grained PAT with Administration: read on the repo.
+# The built-in GITHUB_TOKEN cannot list runners. Every failure path (no
+# secret, API error, expired token, no online runner) falls back to hosted, so
+# a broken token costs hosted minutes, never a stuck PR.
+
+on:
+  workflow_call:
+    inputs:
+      labels:
+        description: JSON array of labels the self-hosted runner must carry
+        type: string
+        required: true
+      fallback:
+        description: GitHub-hosted runner label to use when no match is online
+        type: string
+        required: true
+      force-hosted:
+        description: skip the lookup and use the fallback (e.g. vars.CI_HOSTED)
+        type: boolean
+        default: false
+    secrets:
+      RUNNER_PICK_TOKEN:
+        required: false
+    outputs:
+      runs-on:
+        description: JSON value for runs-on (a label array or a quoted label)
+        value: ${{ jobs.pick.outputs.runs-on }}
+      where:
+        description: self-hosted or hosted
+        value: ${{ jobs.pick.outputs.where }}
+
+permissions: {}
+
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      runs-on: ${{ steps.pick.outputs.runs-on }}
+      where: ${{ steps.pick.outputs.where }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_PICK_TOKEN }}
+          LABELS: ${{ inputs.labels }}
+          FALLBACK: ${{ inputs.fallback }}
+          FORCE: ${{ inputs.force-hosted }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -u
+          hosted() {
+            echo "runs-on=$(jq -cn --arg f "$FALLBACK" '$f')" >> "$GITHUB_OUTPUT"
+            echo "where=hosted" >> "$GITHUB_OUTPUT"
+            echo "::notice title=pick-runner::$1 — running on hosted $FALLBACK"
+            exit 0
+          }
+          jq -e 'type == "array" and length > 0' <<<"$LABELS" >/dev/null || { echo "::error::labels must be a non-empty JSON array, got: $LABELS"; exit 1; }
+          [ "$FORCE" = "true" ] && hosted "force-hosted is set"
+          [ -n "$GH_TOKEN" ] || hosted "no RUNNER_PICK_TOKEN secret"
+          runners=$(gh api "repos/$REPO/actions/runners?per_page=100" 2>/dev/null) || hosted "runner lookup failed (token missing scope or expired?)"
+          n=$(jq --argjson want "$LABELS" '
+                [ .runners[]
+                  | select(.status == "online")
+                  | select([.labels[].name | ascii_downcase] as $have
+                           | all($want[] | ascii_downcase; . as $w | $have | index($w) != null)) ]
+                | length' <<<"$runners")
+          [ "$n" -gt 0 ] || hosted "no online runner with $LABELS"
+          echo "runs-on=$(jq -c . <<<"$LABELS")" >> "$GITHUB_OUTPUT"
+          echo "where=self-hosted" >> "$GITHUB_OUTPUT"
+          echo "::notice title=pick-runner::$n online runner(s) match $LABELS — running self-hosted"
