@@ -8,7 +8,7 @@ Callers pin `@v1`. The `v1` tag moves forward only after `ci` (this repo's self-
 
 | Workflow | Use it for |
 |---|---|
-| `test.yml` | Running a repo's own test command, with optional toolchain setup (`uv`, `bun`, `node`, `java`) |
+| `test.yml` | Running a repo's own test command, with optional toolchain setup (`uv`, `bun`, `node`, `java`). A pull request that changes only `docs/` or a root `*.md` skips the setup and the command and still reports green (`notes-skip: false` turns that off) |
 | `static.yml` | Syntax gate for repos without tests: `.py` parses, `.json` is valid, `.sh` passes `bash -n` and shellcheck errors, `.mjs` passes `node --check` |
 | `pick-runner.yml` | Run on a self-hosted runner when one with the given labels is online; otherwise fall back to a hosted runner |
 
@@ -19,9 +19,7 @@ Hosted Linux, Python:
 ```yaml
 name: test
 on:
-  push:
-    branches: [main]
-  pull_request:
+  pull_request:   # no push-to-main run: it would bill every merged change twice
 permissions:
   contents: read
 jobs:
