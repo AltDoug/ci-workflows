@@ -19,6 +19,13 @@ name: test
 #   java -> actions/setup-java temurin (java-version) + gradle/actions/setup-gradle
 # runs-on: a JSON value — '"ubuntu-latest"' (default) or a label array from
 # pick-runner. Commands run in bash on every OS (Git Bash on Windows).
+#
+# notes-skip (default true): on a pull request that changes ONLY notes — files
+# under docs/ or a root-level *.md — the toolchain setup and the command are
+# skipped and the job still reports green, so a required check is satisfied
+# and a notes PR costs seconds, not a full test run. Any other changed path,
+# a push, a manual run or a gate error runs the tests. Set `notes-skip: false`
+# in a repo whose tests read docs/ or a root *.md.
 
 on:
   workflow_call:
@@ -50,6 +57,10 @@ on:
       timeout-minutes:
         type: number
         default: 20
+      notes-skip:
+        description: skip setup + command on pull requests that change only docs/ or root *.md
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -64,33 +75,57 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2   # the notes gate diffs the PR merge commit against its first parent
 
-      - if: contains(format(' {0} ', inputs.setup), ' uv ')
+      - id: gate
+        name: Notes gate
+        working-directory: .
+        env:
+          NOTES_SKIP: ${{ inputs.notes-skip }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          # On pull_request the checkout is the merge commit: HEAD^1 is the base
+          # branch, HEAD^2 the PR head, so HEAD^1..HEAD is exactly what the PR changes.
+          code=true
+          if [ "$NOTES_SKIP" = true ] && [ "$EVENT" = pull_request ] \
+             && git rev-parse -q --verify 'HEAD^2' >/dev/null \
+             && files=$(git diff --name-only 'HEAD^1' HEAD) && [ -n "$files" ]; then
+            code=false
+            while IFS= read -r f; do
+              case "$f" in docs/*) ;; */*) code=true ;; *.md) ;; *) code=true ;; esac
+            done <<<"$files"
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" = true ]; then echo "notes gate: running the tests"; else echo "::notice title=notes gate::only docs/ or root *.md changed — setup and tests skipped"; fi
+
+      - if: steps.gate.outputs.code == 'true' && contains(format(' {0} ', inputs.setup), ' uv ')
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           python-version: ${{ inputs.python-version }}
 
-      - if: contains(format(' {0} ', inputs.setup), ' bun ')
+      - if: steps.gate.outputs.code == 'true' && contains(format(' {0} ', inputs.setup), ' bun ')
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
-      - if: contains(format(' {0} ', inputs.setup), ' node ')
+      - if: steps.gate.outputs.code == 'true' && contains(format(' {0} ', inputs.setup), ' node ')
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ inputs.node-version }}
 
-      - if: contains(format(' {0} ', inputs.setup), ' java ')
+      - if: steps.gate.outputs.code == 'true' && contains(format(' {0} ', inputs.setup), ' java ')
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
 
-      - if: contains(format(' {0} ', inputs.setup), ' java ')
+      - if: steps.gate.outputs.code == 'true' && contains(format(' {0} ', inputs.setup), ' java ')
         uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       - name: Where this ran
         run: echo "runner=${RUNNER_NAME} os=${RUNNER_OS} env=${RUNNER_ENVIRONMENT}"
 
       - name: Test
+        if: steps.gate.outputs.code == 'true'
         env:
           CI_COMMAND: ${{ inputs.command }}
         run: bash -eo pipefail -c "$CI_COMMAND"
